@@ -1,0 +1,282 @@
+Hacking(and automating!) the OWASP Juice Shop
+
+A little while ago I found the OWASP Juice Shop, and thoroughly enjoyed stumbling my way through its various challenges. The Juice Shop page itself can explain what it's about better than I need to here, but anybody looking for a stepping stone into the strange and mystical world of security testing, or even just web application testing in general, would be well-advised to check it out.
+
+After sharing it with my team at work, I wrote a guide to help them progress through various challenges at their own pace, without feeling too lost. While writing that, I ended up including snippets of Python code I was running from the REPL to demonstrate, and thought "...hey, I could probably automate this whole thing!"
+
+This blog is the result, and the code for the impatient ones is here. This blog and the linked repository were written against version 2.18 of the Juice Shop - naturally, by the time I got around to writing this, there's been an update that added a new challenge which I haven't had a chance to really look at yet. Something to do after I finish writing this! Anyway, below is the full list of challenges along with some (hopefully) useful explanations for how I figured them out initially.
+
+SPOILER WARNING: everything below here should only be read if you've completed as much as you can of the Juice Shop.
+
+Preparation
+Grab a copy of the Juice Shop from the link above. For the remainder of this blog I'll be assuming it lives at http://localhost:3000.
+Take a look at the OWASP Top Ten Project for areas to consider.
+Some familiarity with your browser's development tools.
+Everybody has their own favourite exploratory testing tools, I find BURP Suite or the OWASP Zed Attack Proxy useful to proxy my browser requests through so I can review the requests my testing ends up making. If you're not seeing requests to and from the Juice Shop, make sure you're not excluding requests to localhost accidentally:
+Firefox proxy config
+Create a user account in the Juice Shop(Login > Register Now!). It doesn't have to be a real email address, but we'll want to log in as somebody to poke around initially, and we don't know how to hack in to anybody else's account yet.
+Right, let's do this!
+
+One-star challenges
+Find the carefully hidden 'Score Board' page.
+Nice light start. Viewing the source of any page in the Juice Shop reveals a commented-out section of the header bar:
+
+<!--
+<li class="dropdown">
+    <a href="#/score-board">Score Board</a>
+</li>
+-->
+So opening http://localhost:3000/#/score-board completes this challenge. The score board helpfully lists all the available flags, and at the end of the list, a Continue code that can be used to restore our progress. This updates with every new flag awarded - it's worth copying regularly, particularly if you're trying to inject data into the Juice Shop as you may mistakenly crash the whole thing!
+
+Provoke an error that is not very gracefully handled.
+There's probably at least a dozen ways you can trip this flag, even without noticing. For now, let's try to login as test'(note the apostrophe) with any old password. It'll fail, showing us a SQLite error that'll come in handy later...
+
+XSS Tier 1: Perform a reflected XSS attack with <script>alert("XSS1")</script>.
+OK, things are heating up. If you're unfamiliar with Cross-site scripting(XSS) attacks, they're used by attackers to execute code in a victim's browser. A reflected XSS attack means the malicious payload is coming from the victim's request, somehow. If we copy the payload and paste it into the Search bar of the Juice Shop, we'll get a nasty little pop-up and a lovely little challenge complete notification, but what actually happened?
+
+Well, once you've closed the XSS alert, take a look at the URL in your browser. Notice how we're at http://localhost:3000/#/search?q=%3Cscript%3Ealert(%22XSS1%22)%3C%2Fscript%3E? The search bar provides the malicious payload as our search parameter, then the Search Results panel tries to display this without any sanitization, causing our script to fire. If we inspect the search results panel with the browser dev tools, we can see it pretty clearly:
+
+<span class="label label-default ng-binding" ng-bind-html="searchQuery">
+<script>alert("XSS1")</script>
+</span>
+This means, if the Juice Shop were a live site, some evildoer could send some innocent soul a link to the search page, with the payload set to some kind of nasty script, and it'll execute in their browser.
+
+Incidentally, since this requires a Javascript engine to fire for the challenge award, it's one of the two challenges that use Selenium in my scripted solutions.
+
+Get rid of all 5-star customer feedback.
+There's a number of ways you can achieve this, but the first method I stumbled on was deleting it directly from the administration panel(accessing this is a later challenge...). As it turns out, any logged in user can accomplish this - a lesson in making sure your admin functions are actually limited to admin users!
+
+Access a confidential document.
+Clicking around the site some more, we end up in the 'About Us' section, which is a huge block of placeholder text except for one link - "Check out our boring terms of use if you are interested in such lame stuff."
+Following this link opens a legal.md file, which is indeed boring, but where it is interests us: http://localhost:3000/ftp/legal.md?md_debug=true. So far, we haven't seen any links to that ftp directory. If we open http://localhost:3000/ftp directly, we get a list of other files, one of which is acquisitions.md - grab that to solve this challenge. Some of the other files in this directory are protected, but don't worry, we'll be back.
+
+Access the administration section of the store.
+I randomly guessed this was located at http://localhost:3000/#/administration. We could have used something like the Forced Browse ZAP extension(a plugin based on DirBuster) to reveal it though.
+
+Give a devastating zero-star feedback to the store.
+We can provide feedback through the Contact Us section of the store. It automatically populates our email address(or sets it to anonymous if we're not logged in), but requires a comment and a rating before we can submit. However, this check is flawed - by entering a comment, selecting a single star, then selecting that same star again to remove the rating, we're able to submit a zero-star feedback and claim this challenge.
+
+Two-star challenges
+Log in with the administrator's user account.
+Remember that SQLite error we encountered earlier? Let's take a closer look at it:
+
+{"error":{
+"message":"SQLITE_ERROR: unrecognized token: \"0cc175b9c0f1b6a831c399e269772661\"",
+"stack":"Error: SQLITE_ERROR: unrecognized token: \"0cc175b9c0f1b6a831c399e269772661\"\n at Error (native)",
+"errno":1,
+"code":"SQLITE_ERROR",
+"sql":"SELECT * FROM Users WHERE email = 'test'' AND password = '0cc175b9c0f1b6a831c399e269772661'"
+}}
+Quite a bit to digest, but that 'sql' bit is interesting:
+
+SELECT * FROM Users WHERE email = 'test'' AND password = '0cc175b9c0f1b6a831c399e269772661'
+It's the full query that tries to execute when we login, but apparently it doesn't like our apostrophe. So, breaking out the SQL injection bag of tricks(or running a tool like SQLmap), we can try manipulating the query by logging in as ' OR 1=1-- with any old password. The apostrophe closes the WHERE email = condition early, at which point we inject an OR to check if the number one is equal to the number one.
+
+It is, shockingly, and the rest of the query becomes a comment thanks to the double dashes, so now the query executed should read SELECT * FROM USERS WHERE EMAIL = '' OR 1=1--... and we're logged in as the administrator. It seems like the site accepted the first result from that SELECT * FROM USERS, and user ID #1 just happens to be the admin. Fantastic.
+
+Log in with the administrator's user credentials without previously changing them or applying SQL Injection.
+Let's head back to the administration panel. We can see a list of usernames, but no passwords, unfortunately - however, that's not entirely true. If we check out the Network tab in our browser's dev console while opening this page, we can see a call made to http://localhost:3000/rest/user/authentication-details/. Checking the response body for this, we can see a list of all user objects, including some sensitive stuff that isn't displayed by the user interface: [...]{"id":1,"email":"admin@juice-sh.op","password":"0192023a7bbd73250516f069df18b500"[...]
+That's not the plaintext password, it's the hash stored in the database. Unfortunately, it's a very weak password, and Googling it reveals it's been cracked long ago. Logging in with admin@juice-sh.op with password admin123 awards this challenge.
+
+Access someone else's basket.
+Still logged in as admin, let's open our dev tools to the Network tab, then click on 'My Basket'. We can see a call to '1', the full path of which is http://localhost:3000/rest/basket/1. Trying to open this URL without being logged in returns a 401 Unauthorized response, but we can use Firefox's handy 'Edit and resend' functionality by right-clicking this request and selecting it. Changing the target url to http://localhost:3000/rest/basket/2, keeping our existing auth headers and so on, completes this challenge. 
+
+Access a salesman's forgotten backup file.
+Let's hop back into the /ftp folder. coupons_2013.md.bak certainly sounds like the kind of thing somebody in Sales would be interested in, but trying to access it throws an error - only .md and .pdf files are allowed. When we first encountered this directory, the legal.md file also had a parameter provided - ?md_debug=true. Adding this to the file doesn't help much, but by changing 'true' to '.md', and accessing http://localhost:3000/ftp/coupons_2013.md.bak?md_debug=.md we're able to open this file and complete the challenge. The contents are a list of coupons... that'll come in handy later.
+
+Inform the shop about an algorithm or library it should definitely not use the way it does.
+This challenge requires us to grab the developer's backup file in /ftp, which we haven't solved yet. In the interest of ticking off challenges as we go, let's just submit a comment saying "z85 0.0", and we can explain it later.
+
+Order the Christmas special offer of 2014.
+Nothing in the available products for Christmas 2014... bah humbug. We already know the login form is vulnerable to SQLi attacks though, so let's take a look at whether or not the products search has similar problems. Pop open the dev console and try searching for test'(again, note the apostrophe). 500 Server Error, and the response body is another SQL error. Let's look at the query:
+
+SELECT * FROM Products WHERE ((name LIKE '%test'%' OR description LIKE '%test'%') AND deletedAt IS NULL) ORDER BY name
+Right at the end, we can see deletedAt IS NULL - the database must perform some kind of soft delete. If we can truncate the query before it reaches that filter, maybe we can find our special. Looking at the first occurence of our test string, we see it's in the middle of a wildcard search. Let's try searching for christmas%25'))-- - the %25 is a url-encoded percentage sign, the apostrophe breaks the query, the double brackets close the opening brackets after WHERE cleanly, and the double dash comments out the rest of the line. Popping that string into the search bar returns only "Christmas Super-Surprise-Box (2014 Edition)" - sounds like our jam. Let's pop that in our basket and checkout to complete this challenge.
+
+Three-star challenges
+Log in with Jim's user account.
+From the same method we used to retrieve the administrator's password earlier, we can retrieve Jim's, and his password is also weak enough to be available through a quick search.
+
+Log in with Bender's user account.
+Bender, however, is clever and apparently chose a strong password. We've already broken the login form to bypass the need for passwords entirely, though, so let's just change our injection string from ' OR 1=1-- to bender@juice-sh.op'-- - this changes the query to SELECT * FROM USERS WHERE email='bender@juice-sh.op', and accepts whatever password we provide since it's unchecked.
+
+XSS Tier 2: Perform a persisted XSS attack with <script>alert("XSS2")</script> bypassing a client-side security mechanism.
+We've already seen a reflected XSS - a persisted XSS means it's coming from somewhere within the site itself, typically injected into a database. This means we no longer need to target and trick a specific person to follow a URL we crafted, but instead can catch any of the site users who happen across our payload. This challenge is asking about client-side security mechanisms, and we've seen one of those during our preparation - when creating a user account, the form demands a valid email address. Well, let's see about that. Log out, then head back to the registration window. Let's open our dev tools, and create a valid user "nobody@nobody.com" with a valid password. We can see in the Network panel that a POST request was sent to /api/Users, with the following request body:
+
+{"password":"abcde","passwordRepeat":"abcde","email":"nobody@nobody.com"}
+Edit and resend time! Let's change that email(note the escaped quotes):
+
+{"password":"abcde","passwordRepeat":"abcde","email":"<script>alert(\"XSS2\")</script>"}
+Challenge complete. Now anybody who views the administration panel, which displays user email addresses, gets hit by our XSS payload.
+
+XSS Tier 3: Perform a persisted XSS attack with <script>alert("XSS3")</script> without using the frontend application at all.
+This time, we're looking for a way to persist data through a vector that the user interface doesn't reveal. After much poking and prodding, you may have noticed that while we frequently perform GETs to /api/Products, we have no way of updating those items... or do we? Let's drop down to the command line and use cUrl to perform an OPTIONS request for a product, dumping the headers to stdout:
+
+$ curl -X OPTIONS -D - 'http://localhost:3000/api/Products/1'
+HTTP/1.1 204 No Content
+X-Powered-By: Express
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET,HEAD,PUT,PATCH,POST,DELETE
+Date: Mon, 19 Dec 2016 04:24:33 GMT
+Connection: keep-alive
+That Access-Control-Allow-Methods is promising. Could be a configuration issue and they're not going to work, but we'll give it a shot anyway:
+
+curl -X PUT "http://localhost:3000/api/Products/1" -H "Content-Type: application/json" --data-binary '{"description":"<script>alert(\"XSS3\")</script>"}'
+...and the response is... [...]"status":"success"[...] Challenge solved. Might want to change that back to something less annoying if you're still exploring, otherwise you'll see it on every search page.
+
+Retrieve a list of all user credentials via SQL Injection
+More SQLi trickery. The easiest place to pull a list of data into would be the search page, from a cursory examination, but we have a problem - the query that page executes is only pulling from the Products table, and we want Users. SQLmap could help you here, but let's do this by hand for the exercise - we want a UNION SELECT command that will allow us to combine a search of the Users table with our Products search. Let's start with an injection that returns zero results for products(who wants 'em?), and tries to union the users table: invalid')) UNION SELECT * FROM USERS--. With our dev console open, let's pop that in the search bar, and...500 Internal Server Error. The error message is new though:
+SQLITE_ERROR: SELECTs to the left and right of UNION do not have the same number of result columns
+Aha! The query worked, we just need an equal number of columns from both tables. With a bit of trial and error, we eventually work out the number and order to get our injection returning all user emails, password hashes and IDs in our results page:
+invalid')) UNION SELECT NULL,email,password,id,NULL,NULL,NULL,NULL FROM USERS--
+Challenge complete, user table dumped. 
+
+Post some feedback in another users name.
+We've already given a zero-star feedback, but let's take a look at that request payload a bit more carefully:
+
+{"UserId":1,"comment":"hi hello","rating":1}
+Edit and resend to the rescue again. Editing our payload to a different(valid) UserId solves this challenge.
+
+Place an order that makes you rich.
+Like a lot of people, I only really care about money when I don't have any. Let's see if we can figure out how to get the Juice Shop paying us back for our not-good deads. Browsing over to the products search with our dev tools open and adding an item to our empty basket(important note: adding a new item behaves differently than adding an existing item!), we can see a POST request to http://localhost:3000/api/BasketItems/1, where 1 is our user id. The request payload for that looks like this:
+{"ProductId":1,"BasketId":"1","quantity":1}
+...where ProductId is the product we want, BasketId is the same as our user id, and quantity is naturally the amount we want. Let's try a simple boundary check here and order a negative number - let's edit and resend that request, but with a different ProductId and quantity:
+{"ProductId":17,"BasketId":"1","quantity":-999}
+Browsing to our basket reveals that the Juice Shop has accepted our order, and checking out grants us all the imaginary money we need for now.
+
+Access a developer's forgotten backup file.
+Back to /ftp we go. We can see a package.json.bak in here, but our earlier trick with the md_debug flag isn't working. Luckily we have other tricks up our sleeves, such as Null byte injection. Appending %2500.md(%25 is a URL encoded percentage sign, so we're asking for %00.md) might get us past the filter, only to hopefully vanish at the filesystem layer and retrieve the actual file instead. Opening localhost:3000/ftp/package.json.bak%2500.md in our browser does indeed allow us to download this file, solving this challenge and giving us a lot more information on how the site was built.
+
+Change the href of the link within the O-Saft product description into http://kimminich.de.
+The same cUrl trick we used to overwrite a product description for XSS3 will work here, just target the O-Saft product ID and PUT the updated description instead.
+
+Inform the shop about a vulnerable library it is using. (Mention the exact library name and version in your comment.)
+There's a couple of options here now that we have the developer's package.json to peruse, but considering the havoc we've been wreaking with SQLi, it seems only fair to submit "sequelize 1.7" as our vulnerable library.
+
+Find the hidden easter egg.
+/ftp folder again, this time grab the eastere.gg file using a null byte injection, same as the developer backup.
+
+Travel back in time to the golden era of web design.
+This Web 2.0 gimmick has grown a bit stale, and it's time to return to browsing in style. If we check out the source of the HOT picture in this challenge description, we can see it's serving up from somewhere interesting...http://localhost:3000/css/geo-bootstrap/img/hot.gif. Googling 'geo-bootstrap' reveals that it is most certainly not the theme currently in play, but the Juice Shop seems to have it installed anyway. Let's go ahead and open the dev console, hop to the Console tab, and after a bit of guesswork set the current theme to geo-bootstrap instead with the following command:
+$('#theme').attr('href', '/css/geo-bootstrap/swatch/bootstrap.css')
+Awesome. Challenge complete, but the satisfaction pales in comparison to our fancy new theme.
+
+Upload a file larger than 100 kB.
+The filesize(and filename, next challenge) filtering both seem to happen in the user interface. Since I do most of my file transfer stuff in Python, let's just use a Python script(Requests library) and be done with it instead of messing around with form boundaries and such:
+
+import requests
+import json
+import os
+
+session = requests.Session()
+jsurl = 'http://localhost:3000'
+# Login stuff, only logged in users can complain
+auth = json.dumps({'email': 'admin@juice-sh.op\'--', 'password': 'whocares'})
+login = session.post('{}/rest/user/login'.format(jsurl),
+                     headers={'Content-Type': 'application/json'},
+                     data=auth)
+if not login.ok:
+    raise RuntimeError('Error logging in.')
+# Create a file 150kb in size
+with open('trash.txt', 'wb') as outfile:
+    outfile.truncate(1024 * 150)
+with open('trash.txt', 'rb') as infile:
+    # Prepare multipart request - whatever as filename, trash.txt as content.
+    files = {'file': ('whatever', infile, 'application/json')}
+    # Post to upload.
+    upload = session.post('{}/file-upload'.format(jsurl), files=files)
+    if not upload.ok:
+        raise RuntimeError('Error uploading file.')
+# Cleanup
+os.remove('trash.txt')
+This solves the next challenge also.
+
+Upload a file that has no .pdf extension.
+See previous solution.
+
+Log in with Bjoern's user account without previously changing his password, applying SQL Injection, or hacking his Google account.
+OK, so we saw in the database dump that Bjoern has a googlemail account. Maybe he used that Google OAuth option on the login window? Let's give it a whirl with our own account and see what happens. OK, sent to Google, asked to log in, then prompted for permission for the OWASP Juice Shop. Allow, back to the juice shop, and... there's a POST to /api/Users:
+
+{"email":"incognitjoeb@gmail.com","password":"aW5jb2duaXRqb2ViQGdtYWlsLmNvbQ=="}
+Hmm. We didn't set any password. Maybe it's grabbing... something from the OAuth mechanism. The next request made was to /login, with this payload:
+
+{"email":"incognitjoeb@gmail.com","password":"aW5jb2duaXRqb2ViQGdtYWlsLmNvbQ==","oauth":true}
+Same password. Let's log out and do that again. This time, the POST to /api/Users tried to send the same email and password, but it hit a snag:
+
+{"status":"error","message":
+{"errno":19,"code":"SQLITE_CONSTRAINT",
+"sql":"INSERT INTO `Users` (`id`,`email`,`password`,`createdAt`,`updatedAt`) VALUES (NULL,'incognitjoeb@gmail.com','71e04ae51b15603eb1e106ea7cb92b30','2016-12-19 05:36:33.000 +00:00','2016-12-19 05:36:33.000 +00:00');"}}
+The call to /login afterwards worked, though. So if an OAuth user doesn't exist yet, the juice shop will automagically make their account and set a password, which is static despite repeated OAuth logins returning new tokens. If it's static it might be something we can figure out...and luckily the password ending in == gives us a clue that it's base64-encoded. Let's decode that and see where we're at(use an online tool if you want):
+
+import base64
+base64.b64decode('aW5jb2duaXRqb2ViQGdtYWlsLmNvbQ==')
+Which prints out..."incognitjoeb@gmail.com"? Oh, that's not good, the account creation process is setting default passwords as the base64-encoded email address. Yep, you guessed it, base64-encode Bjoern's email address to find his password, no OAuth wizardry required.
+
+Four-star challenges
+XSS Tier 4: Perform a persisted XSS attack with <script>alert("XSS4")</script> bypassing a server-side security mechanism.
+We've been shoving unsanitized input here, there and everywhere it seems, but there is one entrypoint that is actually doing something - if we try to send feedback with a <script> tag in the comment, the response indicates it was stripped out entirely(along with its contents) in the response. So, sending this challenge's payload as a comment just comes back with an empty comment. Super. Let's take a look through the package.json.bak and see what could be doing that...sanitize-html certainly seems like a candidate. v1.4.2 is installed, which is apparently a bit out of date since the latest is 1.13.0 at the time of writing. Looking through the changelog, we can see an interesting entry for 1.4.3:
+1.4.3: invokes itself recursively until the markup stops changing to guard against this issue. Bump to htmlparser2 version 3.7.x.
+Interesting, the version in use has an unpatched bug, and that entry links us to an example of how to exploit. Let's go ahead and try putting some bait tags in the middle of our payload tags, so they'll be removed and hopefully our reign of terror can continue. Entering <</b>script>alert("XSS4")<</b>/script> as a feedback comment and submitting wins us this challenge.
+
+Wherever you go, there you are.
+It took me forever to even work out what this meant. Eventually I ended up hovering over the 'Fork me on Github!' banner, and noticed it's pointing to a redirect page instead of linking direct: http://localhost:3000/redirect?to=https://github.com/bkimminich/juice-shop. Replacing the 'to=' param with a site of our choosing returns an error: 406 Unrecognized Target URL. OK, now we know what we have to beat. Since there's obviously something checking the parameters in this request for a whitelisted URL, let's see if it's smart enough to tell the difference between a parameter for ?to or if it's just taking the final parameter and assuming that's the target, by opening:
+http://localhost:3000/redirect?to=https://google.ie/?https://github.com/bkimminich/juice-shop
+Guess not. Wherever you go, it should be the next challenge because we're done here.
+
+Change Bender's password into slurmCl4ssic without using SQL Injection.
+Goodbye SQLi, you were a good friend but we must part ways for now. Let's go take a look at this 'Change Password' window. Current password, new password and repeat new password. Not so good - we can log in as Bender with a SQLi(welcome back old friend!), but we don't know his current password so this window won't help us much. Let's put in some random text for the current password and just see where the call goes anyway...and we see a GET(?!) appear:
+http://localhost:3000/rest/user/change-password?current=abcde&new=slurmCl4ssic&repeat=slurmCl4ssic
+This returns a 401 unauthorized, with the message 'Current password is not correct', but we were kind of expecting that. Let's put this endpoint through its paces, and drop the current=abcde bit altogether to see what happens...oops. Looks like it worked, if the current parameter is excluded then the new and repeat are instantly accepted, putting all users at risk of a CSRF attack that could change their passwords.
+
+Bonus round: let's go ahead and prove this out by using one of our XSS exploits to trigger a password change. Log in as any user you want, then open this link:
+http://localhost:3000/#/search?q=%3Cscript%3Exmlhttp%20%3D%20new%20XMLHttpRequest;%20xmlhttp.open('GET',%20'http:%2F%2Flocalhost:3000%2Frest%2Fuser%2Fchange-password%3Fnew%3DslurmCl4ssic%26repeat%3DslurmCl4ssic');%20xmlhttp.send()%3C%2Fscript%3E
+Not the easiest to remember, but oh well, this is why URL shorteners were invented. Look at your network traffic in the dev console - see that call to change-password? Congratulations, now your password is slurmCl4ssic too. Log out and back in to confirm. Let's clean up that URL-encoded payload a bit and see what we're looking at:
+
+<script>
+xmlhttp = new XMLHttpRequest;
+xmlhttp.open('GET', 'http://localhost:3000/rest/user/change-password?new=slurmCl4ssic&repeat=slurmCl4ssic');
+xmlhttp.send()
+</script>
+Nasty - by following a search link sent by some villain, they've changed our password. Since we don't get logged out by this activity, we might not even notice - this extremely crude payload returns a blank search panel since it breaks the SQL search, which is pretty much the only clue a normal user would have that something was amiss.
+
+I really, really like this challenge.
+
+Apply some advanced cryptanalysis to find the real easter egg.
+Read the eastere.gg file and play this one out for yourself - don't be afraid, it's not as daunting as you might think. There's two rounds of encoding at play, is all I'll say here - you can check the automated repository for the solution if you really want, it's in the misc.py file.
+
+Retrieve the language file that never made it into production.
+Watching the network traffic whenever we load a page gives us the location of the language files - http://localhost:3000/i18n/en.json gives us all the strings in the juice shop in English, for example. See the automated repo for the source file I used to bruteforce my way through this challenge - there's a lot more language codes than I knew about!
+
+Exploit OAuth 2.0 to log in with the Chief Information Security Officer's user account.
+OK, we figured out how to find the default passwords for users who signed up with OAuth, but this is clearly a different kind of problem - it's an internal(@juice-sh.op) address, it's the CISO so we'd hope for some level of password security, and so on. Plus the challenge is directly telling us we have to exploit OAuth 2.0 somehow. This should be interesting...
+
+...in fact, I solved this one accidentally, and it took me at least fifteen minutes to even figure out what had happened. So, let's start from the basics here - the login window. We've got an email field, a password field, a Log In button, a Google OAuth login button, and a link to "Register Now!". Oh, and a Remember Me checkbox, like every other login window... actually, let's see what that does. First let's log in with credentials we actually have. Now, take a look at your cookies, since that's how Remember Me functionality usually works... and yep, we have a cookie from the juice shop with an email key and our user's email address as the value. Browse around the site a bit, and pay attention to your headers - see that X-User-Email header? We didn't seem to have that before. Must be coming from our cookie! Let's log out and try to log in as ciso@juice-sh.op with an invalid password but Remember Me ticked. Doing this sets our cookie email value to the CISO, so our user email header is the CISO too, but that doesn't get us much further... until we remember this is an OAuth challenge, and log in using the OAuth mechanism... and boom, we're done!
+
+The solution in the automated repository might be cleaner to read, but the flaw here seems to be that the OAuth integration for login will accept the 'X-User-Email' header as gospel regardless of the account that just logged in, so this header combined with a 'valid' OAuth login(you can actually just set it to true in the payload sent to /login !) exposes the CISO's account.
+
+Five-star challenges
+Forge a coupon code that gives you a discount of at least 80%.
+Let's dig out that coupons backup file we recovered so long ago. Looking at the last characters at each of the coupons, there seems to be some commonality, but it's impossible to say what...except we already said it, way back in the "Inform the shop about an algorithm or library it should definitely not use the way it does." - z85 is being used for encoding these coupons. From the spec:
+The binary frame SHALL have a length that is divisible by 4 with no remainder. The string frame SHALL have a length that is divisible by 5 with no remainder. Our coupons are all 10 characters long. Trying to enter any other length in the checkout window actually tells us they must be 10 characters precisely. So we're looking at two string frames per coupon, and by decoding them, we can probably figure out the pattern:
+
+from zmq.utils import z85
+z85.decode('l}6D$gC7ss')
+# Output: 'DEC13-15'
+z85.decode('pes[BgC7sn')
+# Output: 'NOV13-10'
+z85.decode('pEw8ogC7sn')
+# Output: 'OCT13-10'
+z85.decode('q:<IqgC7sn')
+# Output: 'SEP13-10'
+There we go - three characters for the month, two digits for the year, a dash and then the desired percentage off. It's Christmas time, so let's give ourselves a nice 99% off by z85 encoding 'DEC16-99', applying that coupon and checking out!
+
+Fake a continue code that solves only (the non-existent) challenge #99.
+Not going to walk through this one either, but I will give some pointers:
+
+grab your continue code now , restart the juice shop, then apply your continue code while dev console is open and watch what happens
+since your continue code obviously has more than one challenge completed, whatever's generating the codes must be able to take a range of IDs as input
+whenever you're researching a new package, it's always worth going through the demos on the authors site and paying close attention
+Of course, this is also solved in the automated repo if you really want to spoil yourself, I won't judge. Well, yes I will, but I'll do it quietly.
+
+Summary
+Hopefully you've learned a few tips and techniques to bring with you in your role as a tester or Skeletor or whoever you happen to be - after making it this far, you've earned whatever you want to do with the information. If you have any questions, comments or suggestions, hit me up
